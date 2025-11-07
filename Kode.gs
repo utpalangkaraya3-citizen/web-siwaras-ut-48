@@ -1,0 +1,1253 @@
+const wbook = SpreadsheetApp.getActive();
+const TZ = "Asia/Makassar";
+
+/** =======================
+ *  Utilitas umum
+ *  ======================= */
+const SHEETS = {
+  admin: "admin",
+  audit: "audit_Log",
+  mBarang: "masterBarang",
+  bMasuk: "barangMasuk",
+  bKeluar: "barangKeluar",
+  tandaTerima: "tandaTerima",
+  ttBarang: "tandaTerimaBarang",
+  ttFormData: "tandaTerimaFormData",
+};
+
+// Kolom yang harus di-format sebagai text
+const TEXT_COLUMNS = {
+  masterBarang: ["kodeBarang"],
+  barangMasuk: ["kodeBarang", "id_bm"],
+  barangKeluar: ["kodeBarang", "id_bk"],
+  tandaTerima: ["id_tt"],
+  tandaTerimaBarang: ["kodeBarang", "id_tt"],
+  tandaTerimaFormData: ["id_tt", "nip"],
+};
+
+function _(name) {
+  const sh = wbook.getSheetByName(name);
+  if (!sh) throw new Error(`Sheet "${name}" tidak ditemukan`);
+  return sh;
+}
+
+function nowISO() {
+  return Utilities.formatDate(new Date(), TZ, "yyyy-MM-dd'T'HH:mm:ssXXX");
+}
+
+function nextNumericIdByHeader(sheet, headerName) {
+  const last = sheet.getLastRow();
+  if (last <= 1) return 1; // belum ada data
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const idx = headers.indexOf(headerName);
+  if (idx === -1)
+    throw new Error(
+      `Header "${headerName}" tidak ditemukan di ${sheet.getName()}`
+    );
+  // ambil nilai id di baris terakhir (asumsi urutan append)
+  const val = sheet.getRange(last, idx + 1).getValue();
+  const num = parseInt(val, 10);
+  return isNaN(num) ? 1 : num + 1;
+}
+
+function getHeaderIndexMap(sheet) {
+  const headers = sheet
+    .getRange(1, 1, 1, sheet.getLastColumn())
+    .getValues()[0]
+    .map((h) => String(h).trim());
+  const map = {};
+  headers.forEach((h, i) => (map[h] = i)); // 0-based index
+  return { headers, map };
+}
+
+// Format tanggal untuk ID: dd/MM/yy (pakai TZ yang sama)
+function dateStrForId(d = new Date()) {
+  return Utilities.formatDate(d, TZ, "dd'/'MM'/'yy");
+}
+
+// Ambil index kolom berdasarkan header (1-based)
+function headerColIndex(sheet, headerName) {
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const idx = headers.indexOf(headerName);
+  if (idx === -1)
+    throw new Error(
+      `Header "${headerName}" tidak ditemukan di ${sheet.getName()}`
+    );
+  return idx + 1; // 1-based
+}
+
+/**
+ * Menghasilkan ID harian unik: <prefix>-dd/MM/yy-<n>
+ * - prefix: 'bm' atau 'bk'
+ * - headerName: 'id_bm' atau 'id_bk'
+ */
+function nextDailyId(sheet, headerName, prefix) {
+  const lastRow = sheet.getLastRow();
+  const datePart = dateStrForId(new Date());
+  const base = `${prefix}-${datePart}`; // contoh: "bm-27/10/25"
+  if (lastRow <= 1) return `${base}-1`;
+
+  const col = headerColIndex(sheet, headerName);
+  const values = sheet.getRange(2, col, lastRow - 1, 1).getValues(); // kolom ID saja (tanpa header)
+
+  let maxN = 0;
+  for (let i = 0; i < values.length; i++) {
+    const v = String(values[i][0] || "").trim();
+    if (v.startsWith(base + "-")) {
+      const parts = v.split("-");
+      const n = parseInt(parts[parts.length - 1], 10);
+      if (Number.isFinite(n) && n > maxN) maxN = n;
+    }
+  }
+  return `${base}-${maxN + 1}`;
+}
+
+// ENHANCED: appendByObject dengan force text format
+function appendByObject(sheetName, obj) {
+  const sheet = _(sheetName);
+  const { headers, map } = getHeaderIndexMap(sheet);
+  const row = new Array(headers.length).fill("");
+
+  Object.keys(obj).forEach((k) => {
+    if (map.hasOwnProperty(k)) {
+      row[map[k]] = obj[k];
+    }
+  });
+
+  sheet.appendRow(row);
+
+  // Force text format untuk kolom tertentu
+  const lastRow = sheet.getLastRow();
+  const textColumns = TEXT_COLUMNS[sheetName] || [];
+
+  textColumns.forEach((colName) => {
+    const colIdx = map[colName];
+    if (colIdx != null && obj[colName] != null) {
+      const range = sheet.getRange(lastRow, colIdx + 1);
+      range.setNumberFormat("@"); // @ = plain text format
+    }
+  });
+
+  return row;
+}
+
+function findRowByKey(sheetName, headerName, keyValue) {
+  const sheet = _(sheetName);
+  const { headers, map } = getHeaderIndexMap(sheet);
+  const colIdx0 = map[headerName];
+  if (colIdx0 == null)
+    throw new Error(`Header "${headerName}" tidak ditemukan di ${sheetName}`);
+  const last = sheet.getLastRow();
+  if (last <= 1) return -1;
+
+  const col = colIdx0 + 1; // 1-based
+  const values = sheet.getRange(2, col, last - 1, 1).getValues();
+
+  // Normalize comparison - trim and convert to string
+  const normalizedKey = String(keyValue).trim();
+
+  for (let i = 0; i < values.length; i++) {
+    const cellValue = String(values[i][0]).trim();
+    if (cellValue === normalizedKey) {
+      return i + 2; // offset header
+    }
+  }
+  return -1;
+}
+
+function updateRowByObject(sheetName, row, obj) {
+  const sheet = _(sheetName);
+  const { headers, map } = getHeaderIndexMap(sheet);
+  const rowVals = sheet.getRange(row, 1, 1, headers.length).getValues()[0];
+
+  Object.keys(obj).forEach((k) => {
+    if (map.hasOwnProperty(k)) {
+      rowVals[map[k]] = obj[k];
+    }
+  });
+
+  sheet.getRange(row, 1, 1, headers.length).setValues([rowVals]);
+
+  // Force text format untuk kolom tertentu
+  const textColumns = TEXT_COLUMNS[sheetName] || [];
+  textColumns.forEach((colName) => {
+    const colIdx = map[colName];
+    if (colIdx != null && obj[colName] != null) {
+      const range = sheet.getRange(row, colIdx + 1);
+      range.setNumberFormat("@");
+    }
+  });
+}
+
+/** =======================
+ *  ONE-TIME SETUP FUNCTION
+ *  ======================= */
+// Run this ONCE to format all existing data as text
+function setupTextFormatAllSheets() {
+  const results = [];
+
+  Object.keys(TEXT_COLUMNS).forEach((sheetName) => {
+    try {
+      const sheet = _(SHEETS[sheetName] || sheetName);
+      const headers = sheet
+        .getRange(1, 1, 1, sheet.getLastColumn())
+        .getValues()[0];
+      const lastRow = sheet.getLastRow();
+
+      if (lastRow <= 1) {
+        results.push(`${sheetName}: No data to format`);
+        return;
+      }
+
+      const columnsToFormat = TEXT_COLUMNS[sheetName];
+
+      columnsToFormat.forEach((colName) => {
+        const colIdx = headers.indexOf(colName);
+        if (colIdx !== -1) {
+          // Format entire column as text (including existing data)
+          const range = sheet.getRange(2, colIdx + 1, lastRow - 1, 1);
+          range.setNumberFormat("@");
+
+          // Get values and re-set them to ensure text format
+          const values = range.getValues();
+          const textValues = values.map((row) => [String(row[0]).trim()]);
+          range.setValues(textValues);
+
+          results.push(
+            `${sheetName}.${colName}: Formatted ${lastRow - 1} rows`
+          );
+        }
+      });
+    } catch (error) {
+      results.push(`${sheetName}: ERROR - ${error.message}`);
+    }
+  });
+
+  Logger.log("=== TEXT FORMAT SETUP COMPLETE ===");
+  results.forEach((r) => Logger.log(r));
+
+  return {
+    ok: true,
+    message: "Text formatting applied",
+    details: results,
+  };
+}
+
+/** =======================
+ *  Admin
+ *  ======================= */
+// Header: id_admin | username | password
+function addAdmin({ id_admin, username, password }) {
+  const sheet = _(SHEETS.admin);
+  const haveId = Boolean(id_admin);
+  if (!haveId) {
+    // auto id_admin: "adm-N" berdasarkan jumlah data
+    const next = sheet.getLastRow() <= 1 ? 1 : sheet.getLastRow() - 1 + 1;
+    id_admin = `adm-${next}`;
+  }
+  appendByObject(SHEETS.admin, { id_admin, username, password });
+  logAudit({
+    id_admin,
+    username,
+    action: "CREATE_ADMIN",
+    details: `Admin ${username} dibuat`,
+  });
+  return { ok: true, id_admin };
+}
+
+/*******************************
+ *  ADMIN READ & AUTH (LOGIN)
+ *******************************/
+
+// Baca semua admin (opsional limit). DEFAULT: tidak mengembalikan password.
+function readAdminAll(limit = 1000, showPassword = false) {
+  const sheet = _(SHEETS.admin);
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return { rows: [] };
+
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0]; // [id_admin, username, password]
+  const count = Math.min(limit, lastRow - 1);
+  const values = sheet.getRange(2, 1, count, headers.length).getValues();
+
+  const rows = values.map((v) => {
+    const obj = {};
+    headers.forEach((h, i) => (obj[String(h)] = v[i]));
+    // hide password unless explicitly requested
+    if (!showPassword) delete obj.password;
+    return obj;
+  });
+  return { rows };
+}
+
+// Baca satu admin by username. showPassword=false default.
+function readAdminByUsername(username, showPassword = false) {
+  if (!username) return { rows: [] };
+  const row = findRowByKey(SHEETS.admin, "username", username);
+  if (row === -1) return { rows: [] };
+  const headers = _(SHEETS.admin)
+    .getRange(1, 1, 1, _(SHEETS.admin).getLastColumn())
+    .getValues()[0];
+  const values = _(SHEETS.admin)
+    .getRange(row, 1, 1, headers.length)
+    .getValues()[0];
+  const obj = {};
+  headers.forEach((h, i) => (obj[String(h)] = values[i]));
+  if (!showPassword) delete obj.password;
+  return { rows: [obj] };
+}
+
+// Verifikasi login (username + password)
+// Mengembalikan { ok:true, auth: true, admin: { id_admin, username } } jika sukses
+// atau { ok:true, auth: false, error: 'Invalid credentials' } jika gagal.
+function verifyLogin({ username = "", password = "" } = {}) {
+  username = String(username || "").trim();
+  password = String(password || "").trim();
+  if (!username || !password) {
+    return {
+      ok: true,
+      auth: false,
+      error: "Username dan password wajib diisi",
+    };
+  }
+  const row = findRowByKey(SHEETS.admin, "username", username);
+  if (row === -1) {
+    logAudit({
+      username,
+      action: "LOGIN_FAILED",
+      details: `Login gagal: username tidak ditemukan (${username})`,
+    });
+    return { ok: true, auth: false, error: "Username atau password salah" };
+  }
+  // ambil password dari baris
+  const headers = _(SHEETS.admin)
+    .getRange(1, 1, 1, _(SHEETS.admin).getLastColumn())
+    .getValues()[0];
+  const values = _(SHEETS.admin)
+    .getRange(row, 1, 1, headers.length)
+    .getValues()[0];
+  const adminObj = {};
+  headers.forEach((h, i) => (adminObj[String(h)] = values[i]));
+
+  const stored = String(adminObj.password || "");
+  // Sederhana: bandingkan langsung (karena saat ini password disimpan plain text)
+  // Jika nanti hashed, gantikan logika ini menjadi verifyHash(password, stored)
+  if (password === stored) {
+    logAudit({
+      id_admin: adminObj.id_admin || "",
+      username,
+      action: "LOGIN_SUCCESS",
+      details: `Login berhasil: ${username}`,
+    });
+    // jangan kirim password kembali
+    return {
+      ok: true,
+      auth: true,
+      admin: {
+        id_admin: adminObj.id_admin || "",
+        username: adminObj.username || "",
+      },
+    };
+  } else {
+    logAudit({
+      id_admin: adminObj.id_admin || "",
+      username,
+      action: "LOGIN_FAILED",
+      details: `Login gagal: password salah (${username})`,
+    });
+    return { ok: true, auth: false, error: "Username atau password salah" };
+  }
+}
+
+/** =======================
+ *  Audit Log
+ *  ======================= */
+// Header: id_log | id_admin | username | action | details | logAt
+function logAudit({ id_admin = "", username = "", action = "", details = "" }) {
+  const sheet = _(SHEETS.audit);
+  const id_log = `log-${Utilities.formatDate(
+    new Date(),
+    TZ,
+    "yyyyMMddHHmmss"
+  )}`;
+  const logAt = nowISO();
+  appendByObject(SHEETS.audit, {
+    id_log,
+    id_admin,
+    username,
+    action,
+    details,
+    logAt,
+  });
+  return { ok: true, id_log };
+}
+// ==== Tambahan: Read Audit (read-only) ====
+function readAudit(limit = 100) {
+  const sheet = _(SHEETS.audit);
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return { rows: [] };
+
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const startRow = Math.max(2, lastRow - limit + 1);
+  const values = sheet
+    .getRange(startRow, 1, lastRow - startRow + 1, sheet.getLastColumn())
+    .getValues();
+
+  const rows = values
+    .map((v) => {
+      const obj = {};
+      headers.forEach((h, i) => (obj[String(h)] = v[i]));
+      return {
+        id_log: obj.id_log || "",
+        id_admin: obj.id_admin || "",
+        username: obj.username || "",
+        action: obj.action || "",
+        details: obj.details || "",
+        logAt: obj.logAt || "",
+      };
+    })
+    .reverse(); // terbaru duluan
+  return { rows };
+}
+
+/** =======================
+ *  READ DATA (GET ALL)
+ *  ======================= */
+
+// Baca semua data dari sheet apapun (mengembalikan array of objects)
+function readAll(sheetName, limit = 1000) {
+  const sheet = _(sheetName);
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return { rows: [] };
+
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const count = Math.min(limit, lastRow - 1);
+  const values = sheet.getRange(2, 1, count, headers.length).getValues();
+
+  const rows = values.map((v) => {
+    const obj = {};
+    headers.forEach((h, i) => {
+      let value = v[i];
+      // Ensure text columns are returned as trimmed strings
+      const headerName = String(h).trim();
+      if (
+        TEXT_COLUMNS[sheetName] &&
+        TEXT_COLUMNS[sheetName].includes(headerName)
+      ) {
+        value = String(value).trim();
+      }
+      obj[headerName] = value;
+    });
+    return obj;
+  });
+
+  return { rows };
+}
+
+/** =======================
+ *  Master Barang
+ *  ======================= */
+// Header: kodeBarang | namaBarang | satuan | stok | createdAt | createdBy | updatedBy
+function addMasterBarang({
+  kodeBarang,
+  namaBarang,
+  satuan,
+  stok = 0,
+  createdBy = "",
+  updatedBy = "",
+}) {
+  const createdAt = nowISO();
+
+  // Normalize kodeBarang to uppercase and trim
+  kodeBarang = String(kodeBarang).trim().toUpperCase();
+
+  appendByObject(SHEETS.mBarang, {
+    kodeBarang,
+    namaBarang,
+    satuan,
+    stok,
+    createdAt,
+    createdBy,
+    updatedBy,
+  });
+
+  logAudit({
+    username: createdBy,
+    action: "CREATE_MASTER_BARANG",
+    details: `Tambah ${kodeBarang} - ${namaBarang}`,
+  });
+  return { ok: true, kodeBarang };
+}
+// body: { kodeBarang, ...field-yg-ingin-diupdate }
+function updateMasterBarang(data) {
+  const { kodeBarang, ...rest } = data || {};
+  if (!kodeBarang) throw new Error("kodeBarang wajib diisi untuk update");
+
+  const normalizedKode = String(kodeBarang).trim().toUpperCase();
+  const row = findRowByKey(SHEETS.mBarang, "kodeBarang", normalizedKode);
+
+  if (row === -1)
+    throw new Error(
+      `masterBarang dengan kode ${normalizedKode} tidak ditemukan`
+    );
+
+  rest.updatedBy = rest.updatedBy || rest.createdBy || "";
+  rest.updatedAt = nowISO();
+  updateRowByObject(SHEETS.mBarang, row, rest);
+
+  logAudit({
+    username: rest.updatedBy || "",
+    action: "UPDATE_MASTER_BARANG",
+    details: `Ubah ${normalizedKode}`,
+  });
+  return { ok: true, kodeBarang: normalizedKode, row };
+}
+// DELETE masterBarang by kodeBarang
+function deleteMasterBarang({ kodeBarang, deletedBy = "" }) {
+  if (!kodeBarang) throw new Error("kodeBarang wajib diisi untuk delete");
+
+  const normalizedKode = String(kodeBarang).trim().toUpperCase();
+  const row = findRowByKey(SHEETS.mBarang, "kodeBarang", normalizedKode);
+
+  if (row === -1)
+    throw new Error(
+      `masterBarang dengan kode ${normalizedKode} tidak ditemukan`
+    );
+
+  _(SHEETS.mBarang).deleteRow(row);
+
+  logAudit({
+    username: deletedBy,
+    action: "DELETE_MASTER_BARANG",
+    details: `Hapus ${normalizedKode}`,
+  });
+  return { ok: true, kodeBarang: normalizedKode, deleted: true };
+}
+
+// ==== Master Barang ====
+function readMasterBarang(limit = 1000) {
+  const { rows } = readAll(SHEETS.mBarang, limit);
+  return { rows };
+}
+
+/** =======================
+ *  Barang Masuk
+ *  ======================= */
+// Header: id_bm | tanggal | kodeBarang | namaBarang | jumlah | satuan | keterangan | createdAt | createdBy
+function addBarangMasuk({
+  tanggal,
+  kodeBarang,
+  namaBarang,
+  jumlah,
+  satuan,
+  keterangan = "",
+  createdBy = "",
+}) {
+  const sheet = _(SHEETS.bMasuk);
+  const id_bm = nextDailyId(sheet, "id_bm", "bm");
+  const createdAt = nowISO();
+
+  // Normalize kodeBarang
+  kodeBarang = String(kodeBarang).trim().toUpperCase();
+
+  appendByObject(SHEETS.bMasuk, {
+    id_bm,
+    tanggal,
+    kodeBarang,
+    namaBarang,
+    jumlah,
+    satuan,
+    keterangan,
+    createdAt,
+    createdBy,
+  });
+
+  const existingRow = findRowByKey(SHEETS.mBarang, "kodeBarang", kodeBarang);
+
+  if (existingRow === -1) {
+    appendByObject(SHEETS.mBarang, {
+      kodeBarang,
+      namaBarang,
+      satuan,
+      stok: jumlah,
+      createdAt: nowISO(),
+      createdBy: createdBy,
+      updatedBy: createdBy,
+    });
+
+    logAudit({
+      username: createdBy,
+      action: "AUTO_CREATE_MASTER_BARANG",
+      details: `Auto-create masterBarang ${kodeBarang} dari barang masuk ${id_bm}`,
+    });
+  } else {
+    const sheetMaster = _(SHEETS.mBarang);
+    const { headers, map } = getHeaderIndexMap(sheetMaster);
+    const stokColIdx = map["stok"];
+
+    if (stokColIdx != null) {
+      const currentStok =
+        sheetMaster.getRange(existingRow, stokColIdx + 1).getValue() || 0;
+      const newStok = Number(currentStok) + Number(jumlah);
+
+      sheetMaster.getRange(existingRow, stokColIdx + 1).setValue(newStok);
+
+      const updatedByIdx = map["updatedBy"];
+      const updatedAtIdx = map["updatedAt"];
+      if (updatedByIdx != null) {
+        sheetMaster.getRange(existingRow, updatedByIdx + 1).setValue(createdBy);
+      }
+      if (updatedAtIdx != null) {
+        sheetMaster.getRange(existingRow, updatedAtIdx + 1).setValue(nowISO());
+      }
+
+      logAudit({
+        username: createdBy,
+        action: "AUTO_UPDATE_STOK_MASTER_BARANG",
+        details: `Update stok ${kodeBarang} dari ${currentStok} menjadi ${newStok} (BM#${id_bm})`,
+      });
+    }
+  }
+
+  logAudit({
+    username: createdBy,
+    action: "CREATE_BM",
+    details: `BM#${id_bm} ${kodeBarang} (${jumlah} ${satuan})`,
+  });
+
+  return { ok: true, id_bm };
+}
+
+// PATCH/UPDATE barangMasuk by id_bm
+// body minimal: { id_bm, ...kolom-yang-diubah }
+function updateBarangMasuk(data) {
+  const { id_bm, ...rest } = data || {};
+  if (!id_bm) throw new Error("id_bm wajib diisi untuk update");
+  const row = findRowByKey(SHEETS.bMasuk, "id_bm", id_bm);
+  if (row === -1)
+    throw new Error(`barangMasuk dengan id_bm ${id_bm} tidak ditemukan`);
+  rest.updatedAt = nowISO();
+  updateRowByObject(SHEETS.bMasuk, row, rest);
+  logAudit({
+    username: rest.updatedBy || "",
+    action: "UPDATE_BM",
+    details: `Ubah BM#${id_bm}`,
+  });
+  return { ok: true, id_bm, row };
+}
+
+// DELETE barangMasuk by id_bm
+function deleteBarangMasuk({ id_bm, deletedBy = "" }) {
+  if (!id_bm) throw new Error("id_bm wajib diisi untuk delete");
+  const row = findRowByKey(SHEETS.bMasuk, "id_bm", id_bm);
+  if (row === -1)
+    throw new Error(`barangMasuk dengan id_bm ${id_bm} tidak ditemukan`);
+  _(SHEETS.bMasuk).deleteRow(row);
+  logAudit({
+    username: deletedBy,
+    action: "DELETE_BM",
+    details: `Hapus BM#${id_bm}`,
+  });
+  return { ok: true, id_bm, deleted: true };
+}
+// ==== Barang Masuk ====
+function readBarangMasuk(limit = 1000) {
+  const { rows } = readAll(SHEETS.bMasuk, limit);
+  return { rows };
+}
+
+/** =======================
+ *  Barang Keluar
+ *  ======================= */
+// Header: id_bk | tanggal | kodeBarang | namaBarang | jumlah | satuan | penerima | event | createdAt | createdBy
+function addBarangKeluar({
+  tanggal,
+  kodeBarang,
+  namaBarang,
+  jumlah,
+  satuan,
+  penerima = "",
+  event = "",
+  createdBy = "",
+}) {
+  const sheet = _(SHEETS.bKeluar);
+  const id_bk = nextDailyId(sheet, "id_bk", "bk");
+  const createdAt = nowISO();
+
+  // Cek stok di masterBarang
+  const existingRow = findRowByKey(SHEETS.mBarang, "kodeBarang", kodeBarang);
+
+  if (existingRow === -1) {
+    throw new Error(
+      `Barang dengan kode ${kodeBarang} tidak ditemukan di master barang. Tidak bisa mengeluarkan barang yang belum terdaftar.`
+    );
+  }
+
+  // Ambil stok saat ini
+  const sheetMaster = _(SHEETS.mBarang);
+  const { headers, map } = getHeaderIndexMap(sheetMaster);
+  const stokColIdx = map["stok"];
+
+  if (stokColIdx != null) {
+    const currentStok =
+      sheetMaster.getRange(existingRow, stokColIdx + 1).getValue() || 0;
+    const newStok = Number(currentStok) - Number(jumlah);
+
+    // Validasi: stok tidak boleh negatif
+    if (newStok < 0) {
+      throw new Error(
+        `Stok tidak cukup! Stok tersedia: ${currentStok} ${satuan}, diminta: ${jumlah} ${satuan}`
+      );
+    }
+
+    // Update stok di masterBarang
+    sheetMaster.getRange(existingRow, stokColIdx + 1).setValue(newStok);
+
+    // Update updatedBy dan updatedAt
+    const updatedByIdx = map["updatedBy"];
+    const updatedAtIdx = map["updatedAt"];
+    if (updatedByIdx != null) {
+      sheetMaster.getRange(existingRow, updatedByIdx + 1).setValue(createdBy);
+    }
+    if (updatedAtIdx != null) {
+      sheetMaster.getRange(existingRow, updatedAtIdx + 1).setValue(nowISO());
+    }
+
+    logAudit({
+      username: createdBy,
+      action: "AUTO_DEDUCT_STOK_MASTER_BARANG",
+      details: `Kurangi stok ${kodeBarang} dari ${currentStok} menjadi ${newStok} (BK#${id_bk})`,
+    });
+  }
+
+  // Tambahkan ke sheet barangKeluar
+  appendByObject(SHEETS.bKeluar, {
+    id_bk,
+    tanggal,
+    kodeBarang,
+    namaBarang,
+    jumlah,
+    satuan,
+    penerima,
+    event,
+    createdAt,
+    createdBy,
+  });
+
+  logAudit({
+    username: createdBy,
+    action: "CREATE_BK",
+    details: `BK#${id_bk} ${kodeBarang} -> ${penerima} (${event})`,
+  });
+
+  return { ok: true, id_bk };
+}
+
+// PATCH/UPDATE barangKeluar by id_bk
+function updateBarangKeluar(data) {
+  const { id_bk, ...rest } = data || {};
+  if (!id_bk) throw new Error("id_bk wajib diisi untuk update");
+  const row = findRowByKey(SHEETS.bKeluar, "id_bk", id_bk);
+  if (row === -1)
+    throw new Error(`barangKeluar dengan id_bk ${id_bk} tidak ditemukan`);
+  rest.updatedAt = nowISO();
+  updateRowByObject(SHEETS.bKeluar, row, rest);
+  logAudit({
+    username: rest.updatedBy || "",
+    action: "UPDATE_BK",
+    details: `Ubah BK#${id_bk}`,
+  });
+  return { ok: true, id_bk, row };
+}
+
+// DELETE barangKeluar by id_bk
+function deleteBarangKeluar({ id_bk, deletedBy = "" }) {
+  if (!id_bk) throw new Error("id_bk wajib diisi untuk delete");
+
+  // Ambil data barang keluar sebelum dihapus
+  const sheet = _(SHEETS.bKeluar);
+  const row = findRowByKey(SHEETS.bKeluar, "id_bk", id_bk);
+  if (row === -1)
+    throw new Error(`barangKeluar dengan id_bk ${id_bk} tidak ditemukan`);
+
+  // Ambil data untuk mengembalikan stok
+  const { headers, map } = getHeaderIndexMap(sheet);
+  const kodeBarangIdx = map["kodeBarang"];
+  const jumlahIdx = map["jumlah"];
+
+  const kodeBarang = sheet.getRange(row, kodeBarangIdx + 1).getValue();
+  const jumlah = sheet.getRange(row, jumlahIdx + 1).getValue() || 0;
+
+  // Kembalikan stok ke masterBarang
+  const masterRow = findRowByKey(SHEETS.mBarang, "kodeBarang", kodeBarang);
+  if (masterRow !== -1) {
+    const sheetMaster = _(SHEETS.mBarang);
+    const masterMap = getHeaderIndexMap(sheetMaster).map;
+    const stokColIdx = masterMap["stok"];
+
+    if (stokColIdx != null) {
+      const currentStok =
+        sheetMaster.getRange(masterRow, stokColIdx + 1).getValue() || 0;
+      const newStok = Number(currentStok) + Number(jumlah);
+
+      sheetMaster.getRange(masterRow, stokColIdx + 1).setValue(newStok);
+
+      // Update updatedBy dan updatedAt
+      const updatedByIdx = masterMap["updatedBy"];
+      const updatedAtIdx = masterMap["updatedAt"];
+      if (updatedByIdx != null) {
+        sheetMaster.getRange(masterRow, updatedByIdx + 1).setValue(deletedBy);
+      }
+      if (updatedAtIdx != null) {
+        sheetMaster.getRange(masterRow, updatedAtIdx + 1).setValue(nowISO());
+      }
+
+      logAudit({
+        username: deletedBy,
+        action: "AUTO_RESTORE_STOK_MASTER_BARANG",
+        details: `Kembalikan stok ${kodeBarang} dari ${currentStok} menjadi ${newStok} (hapus BK#${id_bk})`,
+      });
+    }
+  }
+
+  // Hapus data barang keluar
+  sheet.deleteRow(row);
+
+  logAudit({
+    username: deletedBy,
+    action: "DELETE_BK",
+    details: `Hapus BK#${id_bk}`,
+  });
+
+  return { ok: true, id_bk, deleted: true };
+}
+
+// ==== Barang Keluar ====
+function readBarangKeluar(limit = 1000) {
+  const { rows } = readAll(SHEETS.bKeluar, limit);
+  return { rows };
+}
+
+/** =======================
+ *  Webhook sederhana (optional)
+ *  ======================= */
+// Kirim POST JSON ke Web App:
+// { "type": "barangMasuk", "data": { "tanggal": "2025-10-27", ... } }
+function doPost(e) {
+  const lock = LockService.getDocumentLock();
+  lock.waitLock(30000);
+  try {
+    const body =
+      e.postData && e.postData.contents ? JSON.parse(e.postData.contents) : {};
+    const type = (body.type || "").toString();
+    const data = body.data || {};
+    let result;
+
+    switch (type) {
+      case "admin":
+        result = addAdmin(data);
+        break;
+      case "login":
+        result = verifyLogin(data);
+        break;
+      case "audit_Log":
+        result = logAudit(data);
+        break;
+      // MASTER BARANG
+      case "masterBarang":
+        result = addMasterBarang(data);
+        break;
+      case "updateMasterBarang":
+        result = updateMasterBarang(data);
+        break;
+      case "deleteMasterBarang":
+        result = deleteMasterBarang(data);
+        break;
+      // BARANG MASUK
+      case "barangMasuk":
+        result = addBarangMasuk(data);
+        break;
+      case "updateBarangMasuk":
+        result = updateBarangMasuk(data);
+        break;
+      case "deleteBarangMasuk":
+        result = deleteBarangMasuk(data);
+        break;
+      // BARANG KELUAR
+      case "barangKeluar":
+        result = addBarangKeluar(data);
+        break;
+      case "updateBarangKeluar":
+        result = updateBarangKeluar(data);
+        break;
+      case "deleteBarangKeluar":
+        result = deleteBarangKeluar(data);
+        break;
+      // TANDA TERIMA
+      case "tandaTerima":
+        result = addTandaTerima(data);
+        break;
+      case "updateTandaTerimaStatus":
+        result = updateTandaTerimaStatus(data);
+        break;
+      case "deleteTandaTerima":
+        result = deleteTandaTerima(data);
+        break;
+
+      // TANDA TERIMA BARANG
+      case "tandaTerimaBarang":
+        result = addTandaTerimaBarang(data);
+        break;
+      case "deleteTandaTerimaBarang":
+        result = deleteTandaTerimaBarang(data);
+        break;
+
+      // TANDA TERIMA FORM DATA
+      case "updateTandaTerimaFormData":
+        result = updateTandaTerimaFormData(data);
+        break;
+
+      default:
+        throw new Error("Tipe tidak dikenali");
+    }
+
+    return ContentService.createTextOutput(
+      JSON.stringify({ ok: true, type, result })
+    ).setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(
+      JSON.stringify({ ok: false, error: String(err) })
+    ).setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function doGet(e) {
+  const params = (e && e.parameter) || {};
+  const type = (params.type || "").toString();
+  const limitStr = params.limit || "1000";
+
+  // Router GET
+  switch (type) {
+    case "readAudit": {
+      const n = parseInt(limitStr, 10);
+      const limit = Number.isFinite(n) && n > 0 ? n : 100;
+      const result = readAudit(limit);
+      return ContentService.createTextOutput(
+        JSON.stringify({ ok: true, type, result })
+      ).setMimeType(ContentService.MimeType.JSON);
+    }
+    case "readAdmin": {
+      // params: username (optional), limit (optional), showPassword (optional 1/0)
+      const username = (params.username || "").toString().trim();
+      const showPassword =
+        params.showPassword === "1" || params.showPassword === "true";
+      const n = parseInt(limitStr, 10);
+      const limit = Number.isFinite(n) && n > 0 ? n : 1000;
+
+      let result;
+      if (username) {
+        result = readAdminByUsername(username, showPassword);
+      } else {
+        result = readAdminAll(limit, showPassword);
+      }
+      return ContentService.createTextOutput(
+        JSON.stringify({ ok: true, type: "readAdmin", result })
+      ).setMimeType(ContentService.MimeType.JSON);
+    }
+    case "readMasterBarang": {
+      const n = parseInt(limitStr, 10);
+      const limit = Number.isFinite(n) && n > 0 ? n : 1000;
+      const result = readMasterBarang(limit);
+      return ContentService.createTextOutput(
+        JSON.stringify({ ok: true, type, result })
+      ).setMimeType(ContentService.MimeType.JSON);
+    }
+    case "readBarangMasuk": {
+      const n = parseInt(limitStr, 10);
+      const limit = Number.isFinite(n) && n > 0 ? n : 1000;
+      const result = readBarangMasuk(limit);
+      return ContentService.createTextOutput(
+        JSON.stringify({ ok: true, type, result })
+      ).setMimeType(ContentService.MimeType.JSON);
+    }
+    case "readBarangKeluar": {
+      const n = parseInt(limitStr, 10);
+      const limit = Number.isFinite(n) && n > 0 ? n : 1000;
+      const result = readBarangKeluar(limit);
+      return ContentService.createTextOutput(
+        JSON.stringify({ ok: true, type, result })
+      ).setMimeType(ContentService.MimeType.JSON);
+    }
+    case "readTandaTerima": {
+      const n = parseInt(limitStr, 10);
+      const limit = Number.isFinite(n) && n > 0 ? n : 1000;
+      const result = readTandaTerima(limit);
+      return ContentService.createTextOutput(
+        JSON.stringify({ ok: true, type, result })
+      ).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    case "readTandaTerimaBarang": {
+      const id_tt = params.id_tt || "";
+      if (!id_tt) {
+        return ContentService.createTextOutput(
+          JSON.stringify({ ok: false, error: "id_tt wajib diisi" })
+        ).setMimeType(ContentService.MimeType.JSON);
+      }
+      const result = readTandaTerimaBarang({ id_tt });
+      return ContentService.createTextOutput(
+        JSON.stringify({ ok: true, type, result })
+      ).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    case "readTandaTerimaFormData": {
+      const id_tt = params.id_tt || "";
+      if (!id_tt) {
+        return ContentService.createTextOutput(
+          JSON.stringify({ ok: false, error: "id_tt wajib diisi" })
+        ).setMimeType(ContentService.MimeType.JSON);
+      }
+      const result = readTandaTerimaFormData({ id_tt });
+      return ContentService.createTextOutput(
+        JSON.stringify({ ok: true, type, result })
+      ).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    default:
+      return ContentService.createTextOutput(
+        JSON.stringify({
+          ok: false,
+          error: "Tipe GET tidak dikenali",
+          receivedType: type,
+        })
+      ).setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+/** =======================
+ *  TANDA TERIMA BARANG KELUAR
+ *  ======================= */
+
+// ========== Tanda Terima (Header) ==========
+// Header: id_tt | tanggal | keterangan | status | createdAt | createdBy | updatedBy
+function addTandaTerima({ tanggal, keterangan = "", createdBy = "" }) {
+  const sheet = _(SHEETS.tandaTerima);
+  const id_tt = nextDailyId(sheet, "id_tt", "tt");
+  const createdAt = nowISO();
+
+  appendByObject(SHEETS.tandaTerima, {
+    id_tt,
+    tanggal,
+    keterangan,
+    status: "Draft", // Draft atau Selesai
+    createdAt,
+    createdBy,
+    updatedBy: "",
+  });
+
+  logAudit({
+    username: createdBy,
+    action: "CREATE_TANDA_TERIMA",
+    details: `TT#${id_tt} - ${keterangan}`,
+  });
+
+  return { ok: true, id_tt };
+}
+
+function readTandaTerima(limit = 1000) {
+  const { rows } = readAll(SHEETS.tandaTerima, limit);
+  return { rows };
+}
+
+function updateTandaTerimaStatus(data) {
+  const { id_tt, status, updatedBy = "" } = data || {};
+  if (!id_tt) throw new Error("id_tt wajib diisi untuk update");
+
+  const row = findRowByKey(SHEETS.tandaTerima, "id_tt", id_tt);
+  if (row === -1) throw new Error(`Tanda terima ${id_tt} tidak ditemukan`);
+
+  const updateData = {
+    status: status,
+    updatedBy: updatedBy,
+    updatedAt: nowISO(),
+  };
+
+  updateRowByObject(SHEETS.tandaTerima, row, updateData);
+
+  logAudit({
+    username: updatedBy,
+    action: "UPDATE_STATUS_TANDA_TERIMA",
+    details: `TT#${id_tt} -> Status: ${status}`,
+  });
+
+  return { ok: true, id_tt, status };
+}
+
+function deleteTandaTerima({ id_tt, deletedBy = "" }) {
+  if (!id_tt) throw new Error("id_tt wajib diisi untuk delete");
+
+  const row = findRowByKey(SHEETS.tandaTerima, "id_tt", id_tt);
+  if (row === -1) throw new Error(`Tanda terima ${id_tt} tidak ditemukan`);
+
+  // Delete barang list
+  const barangSheet = _(SHEETS.ttBarang);
+  const barangData = barangSheet.getDataRange().getValues();
+  const headers = barangData[0];
+  const idTtIndex = headers.indexOf("id_tt");
+
+  for (let i = barangData.length - 1; i >= 1; i--) {
+    if (barangData[i][idTtIndex] === id_tt) {
+      barangSheet.deleteRow(i + 1);
+    }
+  }
+
+  // Delete form data
+  const formRow = findRowByKey(SHEETS.ttFormData, "id_tt", id_tt);
+  if (formRow !== -1) {
+    _(SHEETS.ttFormData).deleteRow(formRow);
+  }
+
+  // Delete tanda terima
+  _(SHEETS.tandaTerima).deleteRow(row);
+
+  logAudit({
+    username: deletedBy,
+    action: "DELETE_TANDA_TERIMA",
+    details: `Hapus TT#${id_tt}`,
+  });
+
+  return { ok: true, id_tt, deleted: true };
+}
+
+// ========== Tanda Terima Barang (Detail) ==========
+// Header: id_tt | kodeBarang | namaBarang | jumlah | satuan | createdAt
+function addTandaTerimaBarang({
+  id_tt,
+  kodeBarang,
+  namaBarang,
+  jumlah,
+  satuan,
+}) {
+  const createdAt = nowISO();
+
+  appendByObject(SHEETS.ttBarang, {
+    id_tt,
+    kodeBarang,
+    namaBarang,
+    jumlah,
+    satuan,
+    createdAt,
+  });
+
+  logAudit({
+    username: "",
+    action: "ADD_BARANG_TO_TT",
+    details: `TT#${id_tt} + ${kodeBarang} (${jumlah} ${satuan})`,
+  });
+
+  return { ok: true, id_tt, kodeBarang };
+}
+
+function readTandaTerimaBarang({ id_tt }) {
+  if (!id_tt) throw new Error("id_tt wajib diisi");
+
+  const sheet = _(SHEETS.ttBarang);
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const idTtIndex = headers.indexOf("id_tt");
+
+  const rows = [];
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][idTtIndex] === id_tt) {
+      const obj = {};
+      headers.forEach((h, idx) => (obj[String(h)] = data[i][idx]));
+      rows.push(obj);
+    }
+  }
+
+  return { rows };
+}
+
+function deleteTandaTerimaBarang({ id_tt, kodeBarang }) {
+  if (!id_tt || !kodeBarang)
+    throw new Error("id_tt dan kodeBarang wajib diisi");
+
+  const sheet = _(SHEETS.ttBarang);
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const idTtIndex = headers.indexOf("id_tt");
+  const kodeBarangIndex = headers.indexOf("kodeBarang");
+
+  for (let i = data.length - 1; i >= 1; i--) {
+    if (
+      data[i][idTtIndex] === id_tt &&
+      data[i][kodeBarangIndex] === kodeBarang
+    ) {
+      sheet.deleteRow(i + 1);
+      break;
+    }
+  }
+
+  logAudit({
+    username: "",
+    action: "DELETE_BARANG_FROM_TT",
+    details: `TT#${id_tt} - ${kodeBarang}`,
+  });
+
+  return { ok: true, id_tt, kodeBarang, deleted: true };
+}
+
+// ========== Tanda Terima Form Data (Penerima) ==========
+// Header: id_tt | nama | nip | keterangan | updatedAt
+function updateTandaTerimaFormData({
+  id_tt,
+  nama = "",
+  nip = "",
+  keterangan = "",
+}) {
+  if (!id_tt) throw new Error("id_tt wajib diisi");
+
+  const row = findRowByKey(SHEETS.ttFormData, "id_tt", id_tt);
+  const updatedAt = nowISO();
+
+  if (row === -1) {
+    // Create new
+    appendByObject(SHEETS.ttFormData, {
+      id_tt,
+      nama,
+      nip,
+      keterangan,
+      updatedAt,
+    });
+  } else {
+    // Update existing
+    updateRowByObject(SHEETS.ttFormData, row, {
+      nama,
+      nip,
+      keterangan,
+      updatedAt,
+    });
+  }
+
+  return { ok: true, id_tt };
+}
+
+function readTandaTerimaFormData({ id_tt }) {
+  if (!id_tt) throw new Error("id_tt wajib diisi");
+
+  const row = findRowByKey(SHEETS.ttFormData, "id_tt", id_tt);
+
+  if (row === -1) {
+    return { rows: [] };
+  }
+
+  const sheet = _(SHEETS.ttFormData);
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const values = sheet.getRange(row, 1, 1, headers.length).getValues()[0];
+
+  const obj = {};
+  headers.forEach((h, i) => (obj[String(h)] = values[i]));
+
+  return { rows: [obj] };
+}

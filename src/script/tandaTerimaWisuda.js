@@ -1,0 +1,1179 @@
+let allData = [];
+let masterBarangData = [];
+let sortAscending = true;
+const DB_TYPE = "wisuda";
+
+// Current detail data
+let currentTandaTerima = null;
+let currentBarangList = [];
+let currentFormData = {
+  nama: "-",
+  nip: "-",
+  keterangan: "-",
+};
+
+// Check authentication
+document.addEventListener("DOMContentLoaded", function () {
+  initTheme(); // Initialize theme first
+
+  const session = Auth.getSession();
+  if (!session.username || session.role !== "admin-wisuda") {
+    toast.error("Anda harus login sebagai Admin Wisuda!", "Akses Ditolak!");
+    setTimeout(() => {
+      window.location.href = "../../index.html";
+    }, 1500);
+    return;
+  }
+
+  document.getElementById("tanggalAdd").valueAsDate = new Date();
+  loadData();
+  loadMasterBarang();
+  setupSearch();
+  setupFormSubmit();
+});
+
+// ==================== THEME MANAGEMENT ====================
+function initTheme() {
+  const savedTheme = localStorage.getItem("siwaras_theme") || "light";
+  document.documentElement.setAttribute("data-theme", savedTheme);
+  console.log("Theme initialized:", savedTheme);
+}
+
+function toggleTheme() {
+  const currentTheme = document.documentElement.getAttribute("data-theme");
+  const newTheme = currentTheme === "light" ? "dark" : "light";
+
+  document.documentElement.setAttribute("data-theme", newTheme);
+  localStorage.setItem("siwaras_theme", newTheme);
+
+  if (window.toast) {
+    toast.success(
+      `Mode ${newTheme === "dark" ? "Gelap" : "Terang"} diaktifkan!`,
+      "Tema Diubah"
+    );
+  }
+
+  console.log("Theme changed to:", newTheme);
+}
+
+// ==================== LOAD DATA ====================
+async function loadData() {
+  Utils.showLoading(true);
+  try {
+    const result = await API.get("readTandaTerima", { limit: 1000 }, DB_TYPE);
+    console.log("Tanda Terima:", result);
+
+    allData = result.rows || [];
+    renderTable(allData);
+  } catch (error) {
+    console.error("Error loading data:", error);
+    toast.error("Gagal memuat data: " + error.message, "Error!");
+  } finally {
+    Utils.showLoading(false);
+  }
+}
+
+async function loadMasterBarang() {
+  try {
+    const result = await API.get("readMasterBarang", { limit: 1000 }, DB_TYPE);
+    masterBarangData = result.rows || [];
+    populateBarangDropdown();
+  } catch (error) {
+    console.error("Error loading master barang:", error);
+  }
+}
+
+function populateBarangDropdown() {
+  const select = document.getElementById("selectBarang");
+  select.innerHTML = '<option value="">-- Pilih Barang --</option>';
+
+  // Only show available items (stok > 0)
+  const availableBarang = masterBarangData.filter((item) => item.stok > 0);
+
+  availableBarang.forEach((item) => {
+    const option = document.createElement("option");
+    option.value = item.kodeBarang;
+    option.textContent = `${item.kodeBarang} - ${item.namaBarang} (Stok: ${item.stok} ${item.satuan})`;
+    option.dataset.namaBarang = item.namaBarang;
+    option.dataset.satuan = item.satuan;
+    option.dataset.stok = item.stok;
+    select.appendChild(option);
+  });
+}
+
+// ==================== RENDER TABLE ====================
+function renderTable(data) {
+  const tbody = document.getElementById("tableBody");
+
+  if (!data || data.length === 0) {
+    tbody.innerHTML = `
+      <tr>
+        <td colspan="6" style="text-align: center; padding: 40px; color: var(--text-muted)">
+          Tidak ada data tanda terima
+        </td>
+      </tr>
+    `;
+    return;
+  }
+
+  tbody.innerHTML = data
+    .map(
+      (item, index) => `
+    <tr>
+      <td>${index + 1}</td>
+      <td><strong>${item.id_tt || "-"}</strong></td>
+      <td>${item.keterangan || "-"}</td>
+      <td>${Utils.formatDate(item.tanggal) || "-"}</td>
+      <td>
+        <span class="status-badge status-${
+          item.status === "Selesai" ? "selesai" : "draft"
+        }">
+          ${item.status || "Draft"}
+        </span>
+      </td>
+      <td>
+        <div class="action-btns">
+          <button class="btn-edit" onclick="openDetailModal('${
+            item.id_tt
+          }')" title="Detail">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/>
+            </svg>
+          </button>
+          ${
+            item.status === "Selesai"
+              ? `
+          <button class="btn-print" onclick="generatePDFDirect('${item.id_tt}')" title="Cetak PDF">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M19 8H5c-1.66 0-3 1.34-3 3v6h4v4h12v-4h4v-6c0-1.66-1.34-3-3-3zm-3 11H8v-5h8v5zm3-7c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm-1-9H6v4h12V3z"/>
+            </svg>
+          </button>
+          `
+              : `
+          <button class="btn-delete" onclick="deleteTandaTerima('${item.id_tt}')" title="Hapus">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>
+            </svg>
+          </button>
+          `
+          }
+        </div>
+      </td>
+    </tr>
+  `
+    )
+    .join("");
+}
+
+// ==================== SEARCH & SORT ====================
+function setupSearch() {
+  const searchInput = document.getElementById("searchInput");
+  searchInput.addEventListener("input", function (e) {
+    const keyword = e.target.value.toLowerCase();
+    const filtered = allData.filter(
+      (item) =>
+        item.id_tt?.toLowerCase().includes(keyword) ||
+        item.keterangan?.toLowerCase().includes(keyword)
+    );
+    renderTable(filtered);
+  });
+}
+
+function toggleSort() {
+  sortAscending = !sortAscending;
+  const sorted = [...allData].sort((a, b) => {
+    const aVal = a.id_tt || "";
+    const bVal = b.id_tt || "";
+    return sortAscending ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+  });
+  renderTable(sorted);
+}
+
+// ==================== MODAL ADD TANDA TERIMA ====================
+function openAddModal() {
+  document.getElementById("tanggalAdd").valueAsDate = new Date();
+  document.getElementById("keteranganAdd").value = "";
+  document.getElementById("modalAdd").classList.add("show");
+}
+
+function closeAddModal() {
+  document.getElementById("modalAdd").classList.remove("show");
+  document.getElementById("addTandaTerimaForm").reset();
+}
+
+function setupFormSubmit() {
+  const form = document.getElementById("addTandaTerimaForm");
+  form.addEventListener("submit", async function (e) {
+    e.preventDefault();
+
+    const session = Auth.getSession();
+    const formData = {
+      tanggal: document.getElementById("tanggalAdd").value,
+      keterangan: document.getElementById("keteranganAdd").value.trim(),
+      status: "Draft",
+      createdBy: session.username,
+    };
+
+    Utils.showLoading(true);
+
+    try {
+      const result = await API.post("tandaTerima", formData, DB_TYPE);
+      await Auth.logAudit(
+        "CREATE_TANDA_TERIMA",
+        `Tambah tanda terima: ${formData.keterangan}`
+      );
+
+      toast.success(
+        `Tanda terima berhasil dibuat!\nID: ${result.id_tt}`,
+        "Berhasil!"
+      );
+
+      closeAddModal();
+      await loadData();
+    } catch (error) {
+      console.error("Error saving data:", error);
+      toast.error("Gagal menyimpan data: " + error.message, "Error!");
+    } finally {
+      Utils.showLoading(false);
+    }
+  });
+}
+
+// ==================== MODAL DETAIL ====================
+async function openDetailModal(id_tt) {
+  const item = allData.find((d) => d.id_tt === id_tt);
+  if (!item) return;
+
+  currentTandaTerima = item;
+
+  // Set header info
+  document.getElementById(
+    "detailTitle"
+  ).textContent = `Detail Tanda Terima - ${id_tt}`;
+  document.getElementById("detailKeterangan").textContent = item.keterangan;
+  document.getElementById("detailTanggal").textContent = Utils.formatDate(
+    item.tanggal
+  );
+  document.getElementById("detailStatus").innerHTML = `
+    <span class="status-badge status-${
+      item.status === "Selesai" ? "selesai" : "draft"
+    }">
+      ${item.status}
+    </span>
+  `;
+
+  // Load detail data
+  await loadDetailData(id_tt);
+
+  // Show/hide buttons based on status
+  const isSelesai = item.status === "Selesai";
+  document.getElementById("btnAddBarang").style.display = isSelesai
+    ? "none"
+    : "flex";
+  document.getElementById("btnValidate").style.display = isSelesai
+    ? "none"
+    : "flex";
+  document.getElementById("btnPDF").style.display = isSelesai ? "flex" : "none";
+
+  // Disable editing if Selesai
+  const editableCells = document.querySelectorAll(".editable");
+  editableCells.forEach((cell) => {
+    if (isSelesai) {
+      cell.ondblclick = null;
+      cell.style.cursor = "default";
+    } else {
+      cell.ondblclick = function () {
+        editCell(this);
+      };
+      cell.style.cursor = "pointer";
+    }
+  });
+
+  document.getElementById("modalDetail").classList.add("show");
+}
+
+async function loadDetailData(id_tt) {
+  Utils.showLoading(true);
+
+  try {
+    // Load barang list
+    const barangResult = await API.get(
+      "readTandaTerimaBarang",
+      { id_tt: id_tt },
+      DB_TYPE
+    );
+    currentBarangList = barangResult.rows || [];
+    renderBarangTable();
+
+    // Load form data
+    const formResult = await API.get(
+      "readTandaTerimaFormData",
+      { id_tt: id_tt },
+      DB_TYPE
+    );
+
+    if (formResult.rows && formResult.rows.length > 0) {
+      currentFormData = formResult.rows[0];
+    } else {
+      currentFormData = { nama: "-", nip: "-", keterangan: "-" };
+    }
+    renderFormData();
+  } catch (error) {
+    console.error("Error loading detail data:", error);
+  } finally {
+    Utils.showLoading(false);
+  }
+}
+
+function closeDetailModal() {
+  document.getElementById("modalDetail").classList.remove("show");
+  currentTandaTerima = null;
+  currentBarangList = [];
+  currentFormData = { nama: "-", nip: "-", keterangan: "-" };
+}
+
+// ==================== RENDER BARANG TABLE ====================
+function renderBarangTable() {
+  const tbody = document.getElementById("tableBarang");
+
+  if (!currentBarangList || currentBarangList.length === 0) {
+    tbody.innerHTML = `
+      <tr>
+        <td colspan="6" style="text-align: center; padding: 20px; color: var(--text-muted)">
+          Belum ada barang. Klik "Tambah Barang" untuk menambahkan.
+        </td>
+      </tr>
+    `;
+    return;
+  }
+
+  const isSelesai = currentTandaTerima?.status === "Selesai";
+
+  tbody.innerHTML = currentBarangList
+    .map(
+      (item, index) => `
+    <tr>
+      <td>${index + 1}</td>
+      <td>${item.kodeBarang}</td>
+      <td>${item.namaBarang}</td>
+      <td>${item.satuan}</td>
+      <td><strong>${item.jumlah}</strong></td>
+      <td>
+        ${
+          !isSelesai
+            ? `
+          <button class="btn-delete-small" onclick="deleteBarangFromList('${item.kodeBarang}')">
+            Hapus
+          </button>
+        `
+            : "-"
+        }
+      </td>
+    </tr>
+  `
+    )
+    .join("");
+}
+
+// ==================== MODAL ADD BARANG ====================
+function openAddBarangModal() {
+  document.getElementById("selectBarang").value = "";
+  document.getElementById("barangInfo").style.display = "none";
+  document.getElementById("jumlahBarang").value = "";
+  document.getElementById("modalAddBarang").classList.add("show");
+}
+
+function closeAddBarangModal() {
+  document.getElementById("modalAddBarang").classList.remove("show");
+  document.getElementById("addBarangForm").reset();
+}
+
+function updateBarangInfo() {
+  const select = document.getElementById("selectBarang");
+  const selectedOption = select.options[select.selectedIndex];
+  const barangInfo = document.getElementById("barangInfo");
+
+  if (select.value) {
+    const isAlreadyAdded = currentBarangList.some(
+      (item) => item.kodeBarang === select.value
+    );
+
+    if (isAlreadyAdded) {
+      toast.warning("Barang ini sudah ada dalam daftar!", "Peringatan!");
+      select.value = "";
+      barangInfo.style.display = "none";
+      return;
+    }
+
+    // Show info
+    barangInfo.style.display = "block";
+    document.getElementById("infoKodeBarang").textContent = select.value;
+    document.getElementById("infoNamaBarang").textContent =
+      selectedOption.dataset.namaBarang || "-";
+    document.getElementById("infoSatuan").textContent =
+      selectedOption.dataset.satuan || "-";
+    document.getElementById("infoStok").textContent =
+      selectedOption.dataset.stok || "0";
+
+    // Set max for jumlah input
+    document.getElementById("jumlahBarang").max =
+      selectedOption.dataset.stok || 0;
+    document.getElementById("jumlahBarang").value = "";
+  } else {
+    barangInfo.style.display = "none";
+  }
+}
+
+// Setup add barang form
+document
+  .getElementById("addBarangForm")
+  .addEventListener("submit", async function (e) {
+    e.preventDefault();
+
+    const select = document.getElementById("selectBarang");
+    const selectedOption = select.options[select.selectedIndex];
+    const jumlah = parseInt(document.getElementById("jumlahBarang").value);
+    const stok = parseInt(selectedOption.dataset.stok);
+
+    if (jumlah > stok) {
+      toast.warning(
+        `Jumlah melebihi stok tersedia!\nStok tersedia: ${stok}`,
+        "Peringatan!"
+      );
+      return;
+    }
+
+    const barangData = {
+      id_tt: currentTandaTerima.id_tt,
+      kodeBarang: select.value,
+      namaBarang: selectedOption.dataset.namaBarang,
+      satuan: selectedOption.dataset.satuan,
+      jumlah: jumlah,
+    };
+
+    Utils.showLoading(true);
+
+    try {
+      await API.post("tandaTerimaBarang", barangData, DB_TYPE);
+      await Auth.logAudit(
+        "ADD_BARANG_TANDA_TERIMA",
+        `Tambah barang ${barangData.kodeBarang} ke tanda terima ${currentTandaTerima.id_tt}`
+      );
+
+      toast.success("Barang berhasil ditambahkan ke daftar!", "Berhasil!");
+
+      closeAddBarangModal();
+      await loadDetailData(currentTandaTerima.id_tt);
+    } catch (error) {
+      console.error("Error adding barang:", error);
+      toast.error("Gagal menambahkan barang: " + error.message, "Error!");
+    } finally {
+      Utils.showLoading(false);
+    }
+  });
+
+// ==================== DELETE BARANG FROM LIST ====================
+async function deleteBarangFromList(kodeBarang) {
+  toast.confirm(
+    `Apakah Anda yakin ingin menghapus barang ${kodeBarang} dari daftar?`,
+    async () => {
+      Utils.showLoading(true);
+
+      try {
+        await API.post(
+          "deleteTandaTerimaBarang",
+          { id_tt: currentTandaTerima.id_tt, kodeBarang: kodeBarang },
+          DB_TYPE
+        );
+        await Auth.logAudit(
+          "DELETE_BARANG_TANDA_TERIMA",
+          `Hapus barang ${kodeBarang} dari tanda terima ${currentTandaTerima.id_tt}`
+        );
+
+        toast.success("Barang berhasil dihapus dari daftar!", "Berhasil!");
+        await loadDetailData(currentTandaTerima.id_tt);
+      } catch (error) {
+        console.error("Error deleting barang:", error);
+        toast.error("Gagal menghapus barang: " + error.message, "Error!");
+      } finally {
+        Utils.showLoading(false);
+      }
+    }
+  );
+}
+
+// ==================== EDITABLE TABLE ====================
+function renderFormData() {
+  document.querySelector('[data-field="nama"] .cell-value').textContent =
+    currentFormData.nama || "-";
+  document.querySelector('[data-field="nip"] .cell-value').textContent =
+    currentFormData.nip || "-";
+  document.querySelector('[data-field="keterangan"] .cell-value').textContent =
+    currentFormData.keterangan || "-";
+}
+
+function editCell(cell) {
+  const isSelesai = currentTandaTerima?.status === "Selesai";
+  if (isSelesai) return;
+
+  const field = cell.dataset.field;
+  const valueSpan = cell.querySelector(".cell-value");
+  const input = cell.querySelector(".cell-input");
+
+  // Set current value
+  input.value = currentFormData[field] === "-" ? "" : currentFormData[field];
+
+  // Show input, hide span
+  valueSpan.style.display = "none";
+  input.style.display = "block";
+  input.focus();
+  input.select();
+
+  cell.classList.add("editing");
+
+  // ✅ DEBOUNCED SAVE (500ms delay after typing stops)
+  let saveTimeout;
+
+  // Handle input change
+  input.oninput = function () {
+    // Clear previous timeout
+    clearTimeout(saveTimeout);
+
+    // Set new timeout
+    saveTimeout = setTimeout(async () => {
+      await saveCell(cell, field, input.value.trim());
+    }, 500); // Wait 500ms after user stops typing
+  };
+
+  // Handle blur (save immediately if changed)
+  input.onblur = async function () {
+    clearTimeout(saveTimeout); // Cancel debounced save
+
+    const newValue = input.value.trim();
+    const oldValue =
+      currentFormData[field] === "-" ? "" : currentFormData[field];
+
+    // Only save if value changed
+    if (newValue !== oldValue) {
+      await saveCell(cell, field, newValue);
+    } else {
+      // Just hide input without saving
+      valueSpan.style.display = "block";
+      input.style.display = "none";
+      cell.classList.remove("editing");
+    }
+  };
+
+  // Handle Enter key (save immediately)
+  input.onkeydown = function (e) {
+    if (e.key === "Enter") {
+      clearTimeout(saveTimeout); // Cancel debounced save
+      input.blur(); // Trigger onblur (which saves)
+    }
+    if (e.key === "Escape") {
+      clearTimeout(saveTimeout); // Cancel debounced save
+      cancelEdit(cell, valueSpan, input);
+    }
+  };
+}
+
+function cancelEdit(cell, valueSpan, input) {
+  valueSpan.style.display = "block";
+  input.style.display = "none";
+  cell.classList.remove("editing");
+}
+
+async function saveCell(cell, field, newValue) {
+  const valueSpan = cell.querySelector(".cell-value");
+  const input = cell.querySelector(".cell-input");
+
+  // If empty, set to "-"
+  if (!newValue) {
+    newValue = "-";
+  }
+
+  // ✅ OPTIMISTIC UPDATE: Update UI immediately (no loading)
+  currentFormData[field] = newValue;
+  valueSpan.textContent = newValue;
+  valueSpan.style.display = "block";
+  input.style.display = "none";
+  cell.classList.remove("editing");
+
+  // ✅ BACKGROUND SAVE: Save to backend without blocking UI
+  try {
+    // Save to backend (in background)
+    await API.post(
+      "updateTandaTerimaFormData",
+      { id_tt: currentTandaTerima.id_tt, ...currentFormData },
+      DB_TYPE
+    );
+
+    // ✅ SILENT SUCCESS: No toast notification to avoid spam
+    console.log(`✅ Saved ${field}: ${newValue}`);
+
+    // Audit log (non-blocking)
+    Auth.logAudit(
+      "UPDATE_FORM_DATA_TANDA_TERIMA",
+      `Update ${field} tanda terima ${currentTandaTerima.id_tt}`
+    );
+  } catch (error) {
+    console.error("Error saving form data:", error);
+
+    // ✅ ROLLBACK on error
+    currentFormData[field] = valueSpan.dataset.oldValue || "-";
+    valueSpan.textContent = currentFormData[field];
+
+    // Show error toast
+    toast.error(`Gagal menyimpan ${field}!\n${error.message}`, "Error!");
+  }
+}
+
+// ==================== VALIDATE TANDA TERIMA ====================
+async function validateTandaTerima() {
+  if (!currentBarangList || currentBarangList.length === 0) {
+    toast.warning(
+      "Belum ada barang dalam daftar!\nTambahkan minimal 1 barang.",
+      "Peringatan!"
+    );
+    return;
+  }
+
+  if (
+    !currentFormData.nama ||
+    currentFormData.nama === "-" ||
+    !currentFormData.nip ||
+    currentFormData.nip === "-"
+  ) {
+    toast.warning(
+      "Data penerima belum lengkap!\nPastikan Nama dan NIP/NIM sudah diisi.",
+      "Peringatan!"
+    );
+    return;
+  }
+
+  toast.confirm(
+    "Validasi data akan mengubah status menjadi Selesai dan tidak dapat diubah lagi.\n\nLanjutkan?",
+    async () => {
+      Utils.showLoading(true);
+
+      try {
+        const session = Auth.getSession();
+
+        // Update status to Selesai
+        await API.post(
+          "updateTandaTerimaStatus",
+          {
+            id_tt: currentTandaTerima.id_tt,
+            status: "Selesai",
+            updatedBy: session.username,
+          },
+          DB_TYPE
+        );
+
+        // Update stok master barang (deduct)
+        for (const barang of currentBarangList) {
+          await API.post(
+            "barangKeluar",
+            {
+              id_tt: currentTandaTerima.id_tt,
+              kodeBarang: barang.kodeBarang,
+              namaBarang: barang.namaBarang,
+              jumlah: barang.jumlah,
+              satuan: barang.satuan,
+              tanggal: currentTandaTerima.tanggal,
+              keterangan: `Barang keluar untuk: ${currentTandaTerima.keterangan}`,
+              createdBy: session.username,
+            },
+            DB_TYPE
+          );
+        }
+
+        await Auth.logAudit(
+          "VALIDATE_TANDA_TERIMA",
+          `Validasi dan finalisasi tanda terima ${currentTandaTerima.id_tt}`
+        );
+
+        toast.success(
+          "Validasi berhasil!\n\nStatus diubah menjadi Selesai.\nStok barang telah dikurangi.\nSilakan cetak PDF.",
+          "Berhasil!"
+        );
+
+        closeDetailModal();
+        await loadData();
+        await loadMasterBarang();
+      } catch (error) {
+        console.error("Error validating:", error);
+        toast.error("Gagal validasi data: " + error.message, "Error!");
+      } finally {
+        Utils.showLoading(false);
+      }
+    }
+  );
+}
+
+// ==================== GENERATE PDF ====================
+async function generatePDF() {
+  if (currentTandaTerima.status !== "Selesai") {
+    toast.warning(
+      "Tanda terima harus divalidasi terlebih dahulu!",
+      "Peringatan!"
+    );
+    return;
+  }
+
+  Utils.showLoading(true);
+
+  try {
+    await generatePDFWithData(
+      currentTandaTerima,
+      currentBarangList,
+      currentFormData
+    );
+  } catch (error) {
+    console.error("Error generating PDF:", error);
+    toast.error("Gagal membuat PDF: " + error.message, "Error!");
+  } finally {
+    Utils.showLoading(false);
+  }
+}
+
+// ==================== GENERATE PDF DIRECT (FROM TABLE) ====================
+async function generatePDFDirect(id_tt) {
+  Utils.showLoading(true);
+
+  try {
+    // Load tanda terima data
+    const tandaTerima = allData.find((d) => d.id_tt === id_tt);
+    if (!tandaTerima) {
+      throw new Error("Data tanda terima tidak ditemukan");
+    }
+
+    // Load barang list
+    const barangResult = await API.get(
+      "readTandaTerimaBarang",
+      { id_tt: id_tt },
+      DB_TYPE
+    );
+    const barangList = barangResult.rows || [];
+
+    // Load form data
+    const formResult = await API.get(
+      "readTandaTerimaFormData",
+      { id_tt: id_tt },
+      DB_TYPE
+    );
+    const formData = formResult.rows?.[0] || {
+      nama: "-",
+      nip: "-",
+      keterangan: "-",
+    };
+
+    // Generate PDF
+    await generatePDFWithData(tandaTerima, barangList, formData);
+  } catch (error) {
+    console.error("Error generating PDF:", error);
+    toast.error("Gagal membuat PDF: " + error.message, "Error!");
+  } finally {
+    Utils.showLoading(false);
+  }
+}
+
+// ==================== GENERATE PDF CORE FUNCTION ====================
+async function generatePDFWithData(tandaTerima, barangList, formData) {
+  if (typeof window.jspdf === "undefined") {
+    throw new Error(
+      "Library PDF belum ter-load. Silakan refresh halaman dan coba lagi."
+    );
+  }
+
+  const { jsPDF } = window.jspdf;
+  if (!jsPDF) {
+    throw new Error("jsPDF constructor not available");
+  }
+
+  const doc = new jsPDF();
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 20;
+  let yPos = margin;
+
+  // ===== LOAD AND ADD LOGO =====
+  const logoBase64 = await loadLogoAsBase64();
+
+  // ===== FUNCTION: ADD HEADER TO PAGE =====
+  const addHeader = (isFirstPage = false) => {
+    const currentY = margin;
+
+    // ===== HEADER WITH LOGO =====
+    const logoWidth = 25;
+    const logoHeight = 18;
+    const logoYPos = currentY;
+
+    if (logoBase64) {
+      doc.addImage(logoBase64, "PNG", margin, logoYPos, logoWidth, logoHeight);
+    }
+
+    // ===== HEADER TEXT (beside logo, vertically centered) =====
+    const headerStartX = margin + logoWidth + 6;
+    const logoCenter = logoYPos + logoHeight / 2;
+
+    // Calculate heights for vertical centering
+    doc.setFontSize(14);
+    doc.setFont("helvetica", "bold");
+    const line1Height = 14 * 0.352778; // Convert pt to mm
+
+    doc.setFontSize(9);
+    doc.setFont("helvetica", "italic");
+    const line2Height = 9 * 0.352778;
+
+    const totalTextHeight = line1Height + line2Height + 3; // 3mm spacing
+    const textStartY = logoCenter - totalTextHeight / 2 + line1Height / 2;
+
+    // Line 1: UNIVERSITAS TERBUKA PALANGKA RAYA
+    doc.setFontSize(14);
+    doc.setFont("helvetica", "bold");
+    doc.text("UNIVERSITAS TERBUKA PALANGKA RAYA", headerStartX, textStartY);
+
+    // Line 2: Sistem Inventori
+    doc.setFontSize(9);
+    doc.setFont("helvetica", "italic");
+    doc.text(
+      "Sistem Inventori Wisuda & Rangkaian Sosprom (SIWARAS)",
+      headerStartX,
+      textStartY + line1Height + 3
+    );
+
+    const headerEndY =
+      Math.max(
+        logoYPos + logoHeight,
+        textStartY + line1Height + line2Height + 3
+      ) + 3;
+
+    // ===== HORIZONTAL LINE =====
+    doc.setLineWidth(0.8);
+    doc.setDrawColor(41, 128, 185);
+    doc.line(margin, headerEndY, pageWidth - margin, headerEndY);
+
+    return headerEndY + 5; // Return Y position after header
+  };
+
+  // ===== FUNCTION: ADD FOOTER TO PAGE =====
+  const addFooter = (pageNumber, totalPages) => {
+    const footerY = pageHeight - 10;
+    doc.setFontSize(7);
+    doc.setFont("helvetica", "italic");
+    doc.setTextColor(120);
+
+    // Page number (left)
+    doc.text(`Halaman ${pageNumber} dari ${totalPages}`, margin, footerY);
+
+    // Timestamp (center)
+    const footerText = `Dicetak: ${new Date().toLocaleString("id-ID")}`;
+    const footerWidth = doc.getTextWidth(footerText);
+    doc.text(footerText, (pageWidth - footerWidth) / 2, footerY);
+
+    // Reset text color
+    doc.setTextColor(0);
+  };
+
+  // ===== ADD HEADER TO FIRST PAGE =====
+  yPos = addHeader(true);
+  yPos += 5;
+
+  // ===== TITLE =====
+  doc.setFontSize(14);
+  doc.setFont("helvetica", "bold");
+  const titleWidth = doc.getTextWidth("TANDA TERIMA BARANG KELUAR");
+  doc.text("TANDA TERIMA BARANG KELUAR", (pageWidth - titleWidth) / 2, yPos);
+  yPos += 10;
+
+  // ===== DOCUMENT INFO =====
+  doc.setFontSize(10);
+  doc.setFont("helvetica", "normal");
+
+  const infoData = [
+    ["ID Tanda Terima", ":", String(tandaTerima.id_tt || "-")],
+    ["Tanggal", ":", String(Utils.formatDate(tandaTerima.tanggal) || "-")],
+    ["Keterangan", ":", String(tandaTerima.keterangan || "-")],
+    ["Status", ":", String(tandaTerima.status || "-")],
+  ];
+
+  infoData.forEach((row) => {
+    doc.text(String(row[0]), margin, yPos);
+    doc.text(String(row[1]), margin + 40, yPos);
+
+    const textValue = String(row[2]);
+    if (textValue.length > 50) {
+      const splitText = doc.splitTextToSize(textValue, pageWidth - margin - 50);
+      doc.text(splitText, margin + 45, yPos);
+      yPos += splitText.length * 5;
+    } else {
+      doc.text(textValue, margin + 45, yPos);
+      yPos += 6;
+    }
+  });
+
+  yPos += 5;
+
+  // ===== TABLE BARANG WITH AUTO PAGE BREAK =====
+  doc.setFontSize(11);
+  doc.setFont("helvetica", "bold");
+  doc.text("Daftar Barang:", margin, yPos);
+  yPos += 7;
+
+  const tableData = barangList.map((item, index) => [
+    String(index + 1),
+    String(item.kodeBarang || "-"),
+    String(item.namaBarang || "-"),
+    String(item.satuan || "-"),
+    String(item.jumlah || 0),
+  ]);
+
+  const tableWidth = pageWidth - 2 * margin;
+  const colWidths = {
+    no: 15,
+    kode: 30,
+    satuan: 25,
+    jumlah: 20,
+  };
+
+  const namaBarangWidth =
+    tableWidth -
+    colWidths.no -
+    colWidths.kode -
+    colWidths.satuan -
+    colWidths.jumlah;
+
+  // ===== AUTO TABLE WITH PAGE BREAK HANDLING =====
+  doc.autoTable({
+    startY: yPos,
+    head: [["No", "Kode Barang", "Nama Barang", "Satuan", "Jumlah"]],
+    body: tableData,
+    theme: "grid",
+    headStyles: {
+      fillColor: [41, 128, 185],
+      textColor: 255,
+      fontStyle: "bold",
+      halign: "center",
+      fontSize: 10,
+    },
+    bodyStyles: {
+      fontSize: 9,
+      cellPadding: 3,
+    },
+    columnStyles: {
+      0: { halign: "center", cellWidth: colWidths.no },
+      1: { halign: "center", cellWidth: colWidths.kode },
+      2: { halign: "left", cellWidth: namaBarangWidth },
+      3: { halign: "center", cellWidth: colWidths.satuan },
+      4: { halign: "center", cellWidth: colWidths.jumlah },
+    },
+    margin: { left: margin, right: margin, top: 50, bottom: 25 },
+    tableWidth: "auto",
+    styles: {
+      overflow: "linebreak",
+      cellWidth: "wrap",
+    },
+    // ===== CALLBACK: ADD HEADER ON NEW PAGE =====
+    didDrawPage: function (data) {
+      // Skip first page (already has header)
+      if (data.pageNumber > 1) {
+        const headerY = addHeader(false);
+
+        // Add "Lanjutan Daftar Barang" text
+        doc.setFontSize(11);
+        doc.setFont("helvetica", "bold");
+        doc.text("Daftar Barang (Lanjutan):", margin, headerY + 5);
+      }
+    },
+    // ===== SHOW HEAD ON EVERY PAGE =====
+    showHead: "everyPage",
+  });
+
+  yPos = doc.lastAutoTable.finalY + 10;
+
+  // ===== CHECK IF NEED NEW PAGE FOR RECIPIENT DATA =====
+  const remainingSpace = pageHeight - yPos - 25; // 25mm for footer
+  const neededSpace = 60; // Estimated space for recipient data + signature
+
+  if (remainingSpace < neededSpace) {
+    doc.addPage();
+    yPos = addHeader(false) + 10;
+  }
+
+  // ===== DATA PENERIMA =====
+  doc.setFontSize(11);
+  doc.setFont("helvetica", "bold");
+  doc.text("Data Penerima:", margin, yPos);
+  yPos += 7;
+
+  doc.setFontSize(10);
+  doc.setFont("helvetica", "normal");
+
+  const penerimaData = [
+    ["Nama", ":", String(formData.nama || "-")],
+    ["NIP/NIM", ":", String(formData.nip || "-")],
+    ["Keterangan", ":", String(formData.keterangan || "-")],
+  ];
+
+  penerimaData.forEach((row) => {
+    doc.text(String(row[0]), margin, yPos);
+    doc.text(String(row[1]), margin + 30, yPos);
+
+    const textValue = String(row[2]);
+    if (textValue.length > 60) {
+      const splitText = doc.splitTextToSize(textValue, pageWidth - margin - 40);
+      doc.text(splitText, margin + 35, yPos);
+      yPos += splitText.length * 5;
+    } else {
+      doc.text(textValue, margin + 35, yPos);
+      yPos += 6;
+    }
+  });
+
+  yPos += 10;
+
+  // ===== SIGNATURE SECTION =====
+  const signatureY = pageHeight - 55;
+  yPos = Math.max(yPos, signatureY);
+
+  const printDate = new Date().toLocaleDateString("id-ID", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  });
+
+  doc.setFontSize(10);
+  doc.setFont("helvetica", "normal");
+  doc.text(`Palangka Raya, ${printDate}`, margin, yPos);
+
+  yPos += 10;
+
+  const col1X = margin + 25;
+  const col2X = pageWidth - margin - 55;
+
+  doc.setFont("helvetica", "bold");
+  doc.text("Yang Menyerahkan,", col1X, yPos);
+  doc.text("Yang Menerima,", col2X, yPos);
+
+  yPos += 20;
+
+  doc.setLineWidth(0.5);
+  doc.line(col1X - 5, yPos, col1X + 50, yPos);
+  doc.line(col2X - 5, yPos, col2X + 50, yPos);
+
+  yPos += 5;
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9);
+  doc.text(String(tandaTerima.createdBy || "Admin"), col1X, yPos);
+  doc.text(String(formData.nama || "-"), col2X, yPos);
+
+  // ===== ADD FOOTER TO ALL PAGES =====
+  const totalPages = doc.internal.getNumberOfPages();
+  for (let i = 1; i <= totalPages; i++) {
+    doc.setPage(i);
+    addFooter(i, totalPages);
+  }
+
+  // ===== SAVE PDF =====
+  const fileName = `TandaTerima_${tandaTerima.id_tt}_${Date.now()}.pdf`;
+  doc.save(fileName);
+
+  await Auth.logAudit(
+    "GENERATE_PDF_TANDA_TERIMA",
+    `Generate PDF tanda terima ${tandaTerima.id_tt}`
+  );
+
+  toast.success("PDF berhasil dibuat dan diunduh!", "Berhasil!");
+}
+
+// Helper function to load logo as base64
+async function loadLogoAsBase64() {
+  try {
+    const logoPath = "../../assets/icon/logo-ut.png";
+
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+
+      img.onload = function () {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0);
+        const dataURL = canvas.toDataURL("image/png");
+        resolve(dataURL);
+      };
+
+      img.onerror = function () {
+        console.warn("Could not load logo image");
+        resolve(null);
+      };
+
+      img.src = logoPath;
+    });
+  } catch (error) {
+    console.error("Error loading logo:", error);
+    return null;
+  }
+}
+
+// ==================== DELETE TANDA TERIMA ====================
+async function deleteTandaTerima(id_tt) {
+  const item = allData.find((d) => d.id_tt === id_tt);
+
+  if (item.status === "Selesai") {
+    toast.warning(
+      "Tanda terima yang sudah Selesai tidak dapat dihapus!",
+      "Peringatan!"
+    );
+    return;
+  }
+
+  toast.confirm(
+    `Apakah Anda yakin ingin menghapus tanda terima ${id_tt}?`,
+    async () => {
+      const session = Auth.getSession();
+      Utils.showLoading(true);
+
+      try {
+        await API.post(
+          "deleteTandaTerima",
+          { id_tt: id_tt, deletedBy: session.username },
+          DB_TYPE
+        );
+        await Auth.logAudit(
+          "DELETE_TANDA_TERIMA",
+          `Hapus tanda terima ${id_tt}`
+        );
+
+        toast.success("Tanda terima berhasil dihapus!", "Berhasil!");
+        await loadData();
+      } catch (error) {
+        console.error("Error deleting data:", error);
+        toast.error("Gagal menghapus data: " + error.message, "Error!");
+      } finally {
+        Utils.showLoading(false);
+      }
+    }
+  );
+}
+
+// ==================== LOGOUT ====================
+function handleLogout() {
+  toast.confirm("Apakah Anda yakin ingin keluar?", async () => {
+    try {
+      await Auth.logAudit("LOGOUT_ADMIN_WISUDA", "Admin Wisuda logout");
+      Auth.clearSession();
+      toast.success("Logout berhasil!", "Goodbye!");
+      setTimeout(() => {
+        window.location.href = "../../index.html";
+      }, 1000);
+    } catch (error) {
+      Auth.clearSession();
+      window.location.href = "../../index.html";
+    }
+  });
+}

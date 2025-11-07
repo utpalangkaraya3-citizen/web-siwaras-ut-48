@@ -1,9 +1,9 @@
 const CONFIG = {
   // Separate URLs for Wisuda and Sosprom
   WISUDA_URL:
-    "https://script.google.com/macros/s/AKfycbxA2EDaXW-3ayhXT3aw82I22h8i0Con1Pa3a4vDMeeTgCMG2pSepM8lf-rsLaNLe-HgFw/exec",
+    "https://script.google.com/macros/s/AKfycbytZC6Gj66tyUhoBtoDo5Oyv8wD0U7sSK7_livodcMQhwqV0epaUol_rMLs6ixc8x0/exec",
   SOSPROM_URL:
-    "https://script.google.com/macros/s/AKfycbwTaltCc9PmpVeALrF361F42jPyXwYL9EmAoGMVL7CFxlzY9Ex8wrwT_RxrmmacXNt4NQ/exec",
+    "https://script.google.com/macros/s/AKfycbw7n02rBDkpEPIli-eJeVXs6hMsSd57-o0AV1te4bljMlNK-rO8egNVY4-5Mxv4RchA-A/exec",
 
   CACHE_DURATION: 5 * 60 * 1000, // 5 minutes
   REQUEST_TIMEOUT: 30000, // 30 seconds
@@ -523,3 +523,4 @@ const Utils = {
 window.addEventListener("DOMContentLoaded", () => {
   CacheManager.clearOld();
 });
+

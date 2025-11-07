@@ -653,7 +653,7 @@ SOFTWARE.
 
 - **Alamat**: Jl. G. Obos No.30, Palangka Raya, Kalimantan Tengah
 - **Website**: [https://palangkaraya.ut.ac.id/](https://palangkaraya.ut.ac.id)
-- **Email**: ut-palangkaraya@ut.ac.id
+- **Email**: ut-palangkaraya@ecampus.ut.ac.id
 
 ## 🙏 Acknowledgments
 
